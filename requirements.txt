@@ -1,0 +1,27 @@
+--extra-index-url https://download.pytorch.org/whl/cu118
+torch==2.3.0
+torchvision==0.18.0
+torchaudio==2.3.0
+
+tensorboard==2.14.0
+
+transformers==4.46.3
+trl==0.15.2
+accelerate==1.0.1
+datasets==2.21.0
+peft==0.14.0
+rich==13.7.1
+wandb==0.17.5
+
+
+vllm==0.4.2
+bitsandbytes==0.43.3
+
+sentencepiece==0.2.0
+protobuf>=3.20.3
+tqdm==4.66.4
+numpy==1.26.4
+scipy==1.13.1
+pydantic>=2.8.0
+
+matplotlib==3.8.2

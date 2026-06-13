@@ -1,0 +1,18 @@
+services:
+  kgrl:
+    build: .
+    image: kgrl:cu118
+    container_name: kgrl
+    gpus: all
+    shm_size: "8gb"
+    stdin_open: true
+    tty: true
+    working_dir: /workspace
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      HF_HOME: /cache/hf
+      HF_DATASETS_CACHE: /cache/hf/datasets
+      TOKENIZERS_PARALLELISM: "false"
+    volumes:
+      - ${HOME}/KGRL_Models:/models
+      - ${HOME}/KGRL:/workspace

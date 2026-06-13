@@ -1,0 +1,38 @@
+# === 私有数据 & 输出产物 ===
+Data/
+Methods/
+Output/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# === 虚拟环境 ===
+venv/
+.venv/
+env/
+.conda/
+
+# === IDE & 编辑器 ===
+.vscode/settings.json
+.vscode/sftp.json
+.idea/
+*.swp
+*.swo
+*~
+
+# === Jupyter ===
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# === Docker ===
+# 镜像和容器数据不提交
+*.tar
+
+# === 操作系统 ===
+.DS_Store
+Thumbs.db
