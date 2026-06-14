@@ -1,0 +1,77 @@
+# ============================================================
+# SFT 节点提取模型 —— 训练配置
+# ============================================================
+
+# -------------------- 模型 --------------------
+model:
+  base_model_path: "/models/Qwen2.5-1.5B-Instruct"   # 基座模型路径
+  output_dir: "/models/qwen-sft-text2node"           # 微调后权重保存目录
+  device_map: "auto"                                  # 自动分配设备 (兼容 bitsandbytes + accelerate)
+  use_flash_attention_2: true                         # 是否启用 Flash Attention 2 加速
+  load_in_4bit: true                                  # INT4 量化加载
+  bnb_4bit_compute_dtype: "bfloat16"                  # 4-bit 计算精度 (bfloat16)
+  bnb_4bit_quant_type: "nf4"                          # 4-bit 量化类型 (nf4 / fp4)
+  bnb_4bit_use_double_quant: true                     # 是否启用双重量化
+  use_gradient_checkpointing: true                    # 梯度检查点 (优化显存)
+  gradient_checkpointing_kwargs:
+    use_reentrant: false                              # gradient checkpointing 模式
+
+# -------------------- LoRA (QLoRA) --------------------
+lora:
+  r: 16                                               # LoRA rank
+  lora_alpha: 32                                      # LoRA alpha
+  lora_dropout: 0.05                                  # LoRA dropout
+  bias: "none"                                        # bias 训练策略
+  task_type: "CAUSAL_LM"                              # 任务类型
+  target_modules:                                     # LoRA 目标模块 (Qwen2.5 结构)
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+
+# -------------------- 训练超参 --------------------
+training:
+  per_device_train_batch_size: 4                       # 单卡训练 batch size
+  per_device_eval_batch_size: 4                        # 单卡验证 batch size
+  gradient_accumulation_steps: 4                       # 梯度累积步数
+  num_train_epochs: 3                                  # 训练轮数
+  learning_rate: 2.0e-4                                # 学习率
+  warmup_ratio: 0.03                                   # warmup 比例
+  lr_scheduler_type: "cosine"                          # 学习率调度器类型
+  optim: "paged_adamw_8bit"                            # 优化器
+  max_grad_norm: 1.0                                   # 梯度裁剪
+  max_seq_length: 2048                                 # 最大序列长度
+  packing: false                                       # 是否 packing 多条样本
+  bf16: true                                           # BF16 混合精度训练
+  fp16: false                                          # FP16 (关闭，使用 BF16)
+  dataloader_num_workers: 4                            # 数据加载线程数
+  remove_unused_columns: false                         # 保留所有列
+  logging_steps: 2                                    # 日志记录间隔 (步)
+  eval_steps: 20                                      # 验证间隔 (步)
+  save_steps: 20                                      # 模型保存间隔 (步, 需为 eval_steps 的整数倍)
+  save_total_limit: 3                                  # 最多保留 checkpoint 数
+  save_strategy: "steps"                               # 保存策略
+  eval_strategy: "steps"                               # 验证策略
+  load_best_model_at_end: true                         # 训练结束时加载最优模型
+  metric_for_best_model: "eval_loss"                   # 最优模型指标
+  greater_is_better: false                             # eval_loss 越低越好
+  seed: 42                                             # 随机种子
+
+# -------------------- 数据 --------------------
+data:
+  train_data_path: "/workspace/Output/SFTDatasets/sft_node_train.json"   # 训练数据 JSONL
+  split_info_path: "/workspace/Output/SFTDatasets/sft_node_split.json"   # 划分索引
+  response_template: "<|im_start|>assistant\n"                            # 助手回复起始标记 (loss 仅计算此后的 token)
+
+# -------------------- 日志 --------------------
+logging:
+  log_dir: "/workspace/Logs/sft_text2node"             # TensorBoard 日志目录
+  use_tensorboard: true                                # 启用 TensorBoard
+
+# -------------------- 评估 --------------------
+eval:
+  test_details_path: "/workspace/Output/SFTDatasets/sft_node_test_details.json"  # 测试集逐样本详情
+  test_output_path: "/workspace/Output/SFTDatasets/sft_node_test_output.json"    # 测试集聚合指标
