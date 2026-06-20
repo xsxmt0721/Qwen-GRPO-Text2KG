@@ -1,0 +1,94 @@
+# ============================================================
+# GRPO 节点提取模型 —— 训练配置
+# ============================================================
+
+# -------------------- 模型 --------------------
+model:
+  base_model_path: "/models/Qwen2.5-1.5B-Instruct"   # 基座模型路径
+  adapter_path: "/models/qwen-sft-text2node"          # SFT LoRA 权重路径 (作为 GRPO 起点)
+  output_dir: "/models/qwen-grpo-text2node"           # GRPO 训练后权重保存目录
+  device_map: "auto"                                  # 自动分配设备
+  use_flash_attention_2: true                         # 是否启用 Flash Attention 2 加速
+  load_in_4bit: true                                  # INT4 量化加载 (节省显存)
+  torch_dtype: "bfloat16"                             # [非量化时使用]
+  bnb_4bit_compute_dtype: "bfloat16"                  # 4-bit 计算精度
+  bnb_4bit_quant_type: "nf4"                          # 4-bit 量化类型 (nf4 / fp4)
+  bnb_4bit_use_double_quant: true                     # 是否启用双重量化
+  use_gradient_checkpointing: False                   # 梯度检查点
+  gradient_checkpointing_kwargs:
+    use_reentrant: false
+
+# -------------------- LoRA (QLoRA) --------------------
+lora:
+  r: 16                                               # LoRA rank
+  lora_alpha: 32                                      # LoRA alpha
+  lora_dropout: 0.05                                  # LoRA dropout
+  bias: "none"
+  task_type: "CAUSAL_LM"
+  target_modules:                                     # LoRA 目标模块 (Qwen2.5 结构)
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+
+# -------------------- 训练超参 --------------------
+training:
+  num_train_epochs: 1                                  # 训练轮数
+  learning_rate: 5.0e-5                                # 学习率 (GRPO 通常比 SFT 低)
+  warmup_ratio: 0.1                                    # warmup 比例
+  lr_scheduler_type: "cosine"                          # 学习率调度器
+  optim: "paged_adamw_8bit"                            # 优化器
+  max_grad_norm: 1.0                                   # 梯度裁剪
+  max_prompt_length: 1024                              # prompt 最大长度 (token) [缩减以降低 KV cache]
+  max_completion_length: 256                           # completion 最大生成长度 (token) [缩减以提速]
+  bf16: true                                           # BF16 混合精度
+  fp16: false                                          # FP16 关闭
+  dataloader_num_workers: 0                            # 数据加载线程数 (0=主进程, 避免容器 fork 死锁)
+
+  # ── GRPO 关键参数 ──
+  # 约束: per_device_train_batch_size 必须是 num_generations 的整数倍
+  kl_beta: 0.04                                         # KL 惩罚系数 (控制与 SFT 的偏离程度)
+  num_generations: 8                                   # 每个 prompt 生成的候选项数
+  temperature: 1.0                                     # 采样温度
+  per_device_train_batch_size: 8                      # 单卡训练 batch size (prompt 数) [缩减以降低显存]
+  per_device_eval_batch_size: 8                       # 单卡验证 batch size
+  gradient_accumulation_steps: 4                       # 梯度累积步数 [增大以补偿 batch 缩减]
+  # 等效总生成量/step = 4 * 4 = 16 completions/step (单卡)
+
+  # ── 日志与保存 ──
+  logging_steps: 1                                     # 日志记录间隔
+  eval_steps: 5                                       # 验证间隔
+  save_steps: 5                                       # 模型保存间隔
+  save_total_limit: 3                                  # 最多保留 checkpoint 数
+  save_strategy: "steps"
+  eval_strategy: "steps"
+  load_best_model_at_end: true
+  metric_for_best_model: "eval_loss"
+
+  # ── 其他 ──
+  seed: 42
+  remove_unused_columns: false
+
+# -------------------- 数据 --------------------
+data:
+  train_data_path: "/workspace/Output/GRPODatasets/grpo_node_train.json"   # 训练数据 JSONL
+  split_info_path: "/workspace/Output/GRPODatasets/grpo_node_split.json"   # 划分索引
+  eval_data_path: "/workspace/Output/GRPODatasets/grpo_node_train.json"    # 验证数据 (复用训练集 split)
+
+# -------------------- 奖励函数 --------------------
+reward:
+  config_path: "config/reward.yaml"                    # 奖励函数配置路径
+
+# -------------------- 日志 --------------------
+logging:
+  log_dir: "/workspace/Logs/grpo_nodes"                # TensorBoard 日志目录
+  use_tensorboard: true
+
+# -------------------- 评估 --------------------
+eval:
+  test_raw_output_path: "/workspace/Output/GRPODatasets/grpo_node_test_raw.json"       # 测试集原始输出 (逐样本)
+  test_details_path: "/workspace/Output/GRPODatasets/grpo_node_test_details.json"      # 测试集逐样本详情
+  test_output_path: "/workspace/Output/GRPODatasets/grpo_node_test_output.json"        # 测试集聚合指标

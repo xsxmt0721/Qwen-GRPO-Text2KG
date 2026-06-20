@@ -106,12 +106,21 @@ def _resolve_attn_implementation(use_flash_attn: bool) -> str:
     return "eager"
 
 
-def load_model_for_eval(cfg: Dict[str, Any]) -> Tuple[Any, AutoTokenizer]:
+def load_model_for_eval(
+    cfg: Dict[str, Any],
+    checkpoint_step: Optional[int] = None,
+) -> Tuple[Any, AutoTokenizer]:
     """
     加载基座模型 + LoRA 微调权重，返回可用于推理的 (model, tokenizer)。
 
     推理阶段不需要 prepare_model_for_kbit_training + LoRA 注入，
     直接加载基座模型后包裹 PeftModel。
+
+    Parameters
+    ----------
+    checkpoint_step : Optional[int]
+        若指定，则从 output_dir/checkpoint-{step} 加载最后一层 adapter
+        （替代 output_dir 根目录下的最终权重）。
     """
     model_cfg = cfg["model"]
 
@@ -148,10 +157,44 @@ def load_model_for_eval(cfg: Dict[str, Any]) -> Tuple[Any, AutoTokenizer]:
         torch_dtype=compute_dtype,
     )
 
-    # ---------- 包裹 PeftModel ----------
-    lora_path = model_cfg["output_dir"]
-    logger.info("Loading LoRA adapter from: %s", lora_path)
-    model = PeftModel.from_pretrained(base_model, lora_path)
+    # ---------- 确定最后一层 adapter 路径 ----------
+    # 检测模式：若 adapter_path 存在 → GRPO 模式（双层 PEFT: 基座 → SFT → GRPO）
+    #          否则 → SFT 模式（单层: 基座 → LoRA）
+    sft_adapter_path = model_cfg.get("adapter_path", None)
+    final_adapter_dir = model_cfg["output_dir"]
+
+    # 若指定了 checkpoint_step，则替换最后一层 adapter 路径为 checkpoint 子目录
+    if checkpoint_step is not None:
+        checkpoint_dir = os.path.join(final_adapter_dir, f"checkpoint-{checkpoint_step}")
+        if not os.path.isdir(checkpoint_dir):
+            logger.error(
+                "Checkpoint directory not found: %s\n"
+                "  output_dir: %s\n"
+                "  checkpoint_step: %s",
+                checkpoint_dir,
+                final_adapter_dir,
+                checkpoint_step,
+            )
+            sys.exit(1)
+        logger.info(
+            "Using checkpoint (step=%d): %s (overriding output_dir)",
+            checkpoint_step,
+            checkpoint_dir,
+        )
+        final_adapter_dir = checkpoint_dir
+
+    if sft_adapter_path is not None:
+        # ── GRPO 模式: 基座 → SFT adapter → GRPO adapter ──
+        logger.info("Detected GRPO mode (adapter_path is set).")
+        logger.info("Loading SFT LoRA adapter from: %s", sft_adapter_path)
+        model = PeftModel.from_pretrained(base_model, sft_adapter_path)
+        logger.info("Loading GRPO LoRA adapter from: %s", final_adapter_dir)
+        model = PeftModel.from_pretrained(model, final_adapter_dir)
+    else:
+        # ── SFT 模式: 基座 → 单层 adapter ──
+        logger.info("Loading LoRA adapter from: %s", final_adapter_dir)
+        model = PeftModel.from_pretrained(base_model, final_adapter_dir)
+
     model.eval()
 
     return model, tokenizer
@@ -161,19 +204,91 @@ def load_model_for_eval(cfg: Dict[str, Any]) -> Tuple[Any, AutoTokenizer]:
 # Completion 解析
 # ===================================================================
 
-# 匹配 ```json ... ``` 代码块
+# 匹配 ```json ... ``` 代码块（含不完整截断的情况）
+_JSON_START_PATTERN = re.compile(r"```json\s*", re.DOTALL)
 _JSON_BLOCK_PATTERN = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
+
+
+def _extract_json_content(completion: str) -> Optional[str]:
+    """
+    从 completion 中提取 JSON 内容，兼容以下情况：
+      1. 完整的 ```json ... ``` 块
+      2. 生成被截断，缺少闭合 ```（取 ```json 之后到字符串末尾的全部内容）
+    """
+    # 优先匹配完整块
+    m = _JSON_BLOCK_PATTERN.search(completion)
+    if m:
+        return m.group(1).strip()
+
+    # 回退：只有开头 ```json，没有闭合 ```
+    m_start = _JSON_START_PATTERN.search(completion)
+    if m_start:
+        # 取 ```json 之后到字符串末尾
+        raw = completion[m_start.end():]
+        # 去掉末尾可能残留的不完整 ```（如 `` 或 `）
+        raw = re.sub(r"\s*`{0,2}\s*$", "", raw)
+        if raw.strip():
+            return raw.strip()
+
+    return None
+
+
+def _try_repair_truncated_json(json_str: str) -> Optional[str]:
+    """
+    尝试修复被截断的 JSON：
+      - 末尾不完整字符串值 → 用空字符串闭合
+      - 缺少 ] 或 } → 补充闭合
+    返回修复后的 JSON 字符串，无法修复则返回 None。
+    """
+    if not json_str:
+        return None
+
+    s = json_str.strip()
+
+    # 统计括号
+    open_braces = s.count("{") - s.count("}")
+    open_brackets = s.count("[") - s.count("]")
+
+    # 如果末尾是不完整的字符串值（如 "type），尝试用 " 闭合
+    # 检测：最后一个非空白字符是否在未闭合的字符串中
+    in_string = False
+    escaped = False
+    for ch in s:
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+
+    # 如果在字符串中间被截断，先闭合字符串
+    if in_string:
+        s += '"'
+
+    # 重新计算（因为可能添加了引号后改变了括号计数）
+    open_braces = s.count("{") - s.count("}")
+    open_brackets = s.count("[") - s.count("]")
+
+    # 闭合括号
+    if open_brackets > 0:
+        s += "]" * open_brackets
+    if open_braces > 0:
+        s += "}" * open_braces
+
+    return s
 
 
 def parse_completion_to_nodes(completion: str) -> Optional[List[Dict[str, str]]]:
     """
     将模型输出的 completion 字符串解析为节点列表。
 
-    要求:
-      - 存在 ```json ... ``` 代码块
+    容错处理：
+      - 若 ```json ... ``` 不完整（生成被截断），尝试提取并修复 JSON
       - 内部 JSON 可解析
       - 顶层有 "nodes" 键，值为数组
-      - 每个元素必须仅有 "name" 和 "type" 两个键（值可不同，键名必须一致）
+      - 每个元素必须仅有 "name" 和 "type" 两个键
 
     Returns
     -------
@@ -184,17 +299,25 @@ def parse_completion_to_nodes(completion: str) -> Optional[List[Dict[str, str]]]
     if not completion or not isinstance(completion, str):
         return None
 
-    # 提取 ```json ... ``` 块
-    m = _JSON_BLOCK_PATTERN.search(completion)
-    if not m:
+    # 提取 JSON 内容（含截断容错）
+    json_str = _extract_json_content(completion)
+    if not json_str:
         return None
 
-    json_str = m.group(1).strip()
-
-    # 尝试解析 JSON
+    # 尝试直接解析
+    obj = None
     try:
         obj = json.loads(json_str)
     except (json.JSONDecodeError, ValueError):
+        # 尝试修复截断的 JSON
+        repaired = _try_repair_truncated_json(json_str)
+        if repaired:
+            try:
+                obj = json.loads(repaired)
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+    if obj is None:
         return None
 
     # 按格式校验
@@ -353,14 +476,18 @@ def compute_aggregate_metrics(
 # 主评估入口
 # ===================================================================
 
-def run_evaluation(config_path: str = "config/sft.yaml") -> None:
-    """执行 SFT 模型测试评估。”"""
+def run_evaluation(
+    config_path: str = "config/sft.yaml",
+    max_samples: Optional[int] = None,
+    checkpoint_step: Optional[int] = None,
+) -> None:
+    """执行 SFT 模型测试评估。"""
     # ---------- 加载配置 ----------
     cfg = load_yaml_config(Path(config_path))
     logger.info("Configuration loaded from: %s", config_path)
 
     # ---------- 加载模型 ----------
-    model, tokenizer = load_model_for_eval(cfg)
+    model, tokenizer = load_model_for_eval(cfg, checkpoint_step=checkpoint_step)
 
     # ---------- 加载测试集 ----------
     data_cfg = cfg["data"]
@@ -373,8 +500,14 @@ def run_evaluation(config_path: str = "config/sft.yaml") -> None:
         logger.error("No test indices found in split file.")
         sys.exit(1)
 
+    # 可选截断：仅评估前 N 个样本
+    if max_samples is not None and max_samples > 0:
+        test_indices = test_indices[:max_samples]
+        logger.info("Limiting to first %d test samples for quick evaluation.", len(test_indices))
+
     # ---------- 逐样本评估 ----------
     details: List[Dict[str, Any]] = []
+    raw_outputs: List[Dict[str, str]] = []
     disable_sampling = os.environ.get("EVAL_DISABLE_SAMPLING", "0") == "1"
 
     logger.info("Starting evaluation on %d test samples...", len(test_indices))
@@ -401,7 +534,7 @@ def run_evaluation(config_path: str = "config/sft.yaml") -> None:
             if disable_sampling:
                 outputs = model.generate(
                     **inputs,
-                    max_new_tokens=512,
+                    max_new_tokens=1024,
                     do_sample=False,
                     pad_token_id=tokenizer.pad_token_id,
                     eos_token_id=tokenizer.eos_token_id,
@@ -409,7 +542,7 @@ def run_evaluation(config_path: str = "config/sft.yaml") -> None:
             else:
                 outputs = model.generate(
                     **inputs,
-                    max_new_tokens=512,
+                    max_new_tokens=1024,
                     do_sample=True,
                     temperature=0.1,
                     top_p=0.9,
@@ -421,6 +554,13 @@ def run_evaluation(config_path: str = "config/sft.yaml") -> None:
         input_len = inputs.input_ids.shape[1]
         generated_ids = outputs[0][input_len:]
         pred_completion_str = tokenizer.decode(generated_ids, skip_special_tokens=True)
+
+        # 保存模型原始输出
+        raw_outputs.append({
+            "prompt": sample.get("prompt", ""),
+            "completion": pred_completion_str,
+            "text": sample.get("text", ""),
+        })
 
         # 解析预测 completion
         pred_nodes = parse_completion_to_nodes(pred_completion_str)
@@ -452,13 +592,22 @@ def run_evaluation(config_path: str = "config/sft.yaml") -> None:
     aggregate = compute_aggregate_metrics(details)
 
     # ---------- 保存结果 ----------
+    # 根据配置自动检测模式，使用对应的默认输出路径
+    _is_grpo = cfg["model"].get("adapter_path") is not None
+    _default_out_dir = "/workspace/Output/GRPODatasets" if _is_grpo else "/workspace/Output/SFTDatasets"
+    _prefix = "grpo" if _is_grpo else "sft"
+
     details_output_path = eval_cfg.get(
         "test_details_path",
-        "/workspace/Output/SFTDatasets/sft_node_test_details.json",
+        f"{_default_out_dir}/{_prefix}_node_test_details.json",
     )
     aggregate_output_path = eval_cfg.get(
         "test_output_path",
-        "/workspace/Output/SFTDatasets/sft_node_test_output.json",
+        f"{_default_out_dir}/{_prefix}_node_test_output.json",
+    )
+    raw_output_path = eval_cfg.get(
+        "test_raw_output_path",
+        f"{_default_out_dir}/{_prefix}_node_test_raw.json",
     )
 
     os.makedirs(os.path.dirname(details_output_path), exist_ok=True)
@@ -470,6 +619,13 @@ def run_evaluation(config_path: str = "config/sft.yaml") -> None:
     with open(aggregate_output_path, "w", encoding="utf-8") as f:
         json.dump(aggregate, f, ensure_ascii=False, indent=2)
     logger.info("Aggregate metrics saved to: %s", aggregate_output_path)
+
+    # 保存模型原始输出 (JSONL 格式, 与 sft_node_train.json 类似)
+    os.makedirs(os.path.dirname(raw_output_path), exist_ok=True)
+    with open(raw_output_path, "w", encoding="utf-8") as f:
+        for item in raw_outputs:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+    logger.info("Raw model outputs saved to: %s (%d samples)", raw_output_path, len(raw_outputs))
 
     # ---------- 打印摘要 ----------
     logger.info("=" * 60)
@@ -497,6 +653,21 @@ def main() -> None:
         action="store_true",
         help="Use greedy decoding instead of sampling.",
     )
+    parser.add_argument(
+        "-n",
+        "--max-samples",
+        type=int,
+        default=None,
+        help="Only evaluate the first N test samples (for quick testing).",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=int,
+        default=None,
+        metavar="STEP",
+        help="Load the last-layer adapter from output_dir/checkpoint-STEP "
+             "instead of output_dir itself.",
+    )
     args = parser.parse_args()
 
     if args.disable_sampling:
@@ -507,7 +678,11 @@ def main() -> None:
         logger.error("Config file not found: %s", config_path)
         sys.exit(1)
 
-    run_evaluation(str(config_path))
+    run_evaluation(
+        str(config_path),
+        max_samples=args.max_samples,
+        checkpoint_step=args.checkpoint,
+    )
 
 
 if __name__ == "__main__":

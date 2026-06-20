@@ -73,5 +73,6 @@ logging:
 
 # -------------------- 评估 --------------------
 eval:
+  test_raw_output_path: "/workspace/Output/SFTDatasets/sft_node_test_raw.json"    # 测试集原始输出 (逐样本)
   test_details_path: "/workspace/Output/SFTDatasets/sft_node_test_details.json"  # 测试集逐样本详情
   test_output_path: "/workspace/Output/SFTDatasets/sft_node_test_output.json"    # 测试集聚合指标

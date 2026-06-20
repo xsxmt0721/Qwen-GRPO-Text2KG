@@ -25,6 +25,18 @@ WORKDIR /workspace
 
 ENV PIP_CACHE_DIR=/root/.cache/pip
 
+# ── PyTorch (先装，flash-attn wheel 依赖) ──
+RUN --mount=type=cache,target=/root/.cache/pip \
+	pip install torch==2.3.0 torchvision==0.18.0 torchaudio==2.3.0 \
+	            --extra-index-url https://download.pytorch.org/whl/cu118
+
+# ── flash-attn 预编译 wheel (cu118 + torch2.3 + cp310) ──
+COPY ./flash_attn-2.6.3+cu118torch2.3cxx11abiFALSE-cp310-cp310-linux_x86_64.whl \
+	/tmp/flash_attn-2.6.3+cu118torch2.3cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
+RUN pip install /tmp/flash_attn-2.6.3+cu118torch2.3cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
+RUN rm /tmp/flash_attn-2.6.3+cu118torch2.3cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
+
+# ── 其余依赖 ──
 COPY requirements.txt /workspace/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
 	pip install -r /workspace/requirements.txt

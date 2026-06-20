@@ -11,14 +11,27 @@ chunking:
 # 节点匹配参数
 matching:
   mode: "asymmetric"           # Jaccard 模式: "symmetric" | "asymmetric"
-  threshold: 0.75               # L2 / L1.5 Jaccard 匹配阈值
+  threshold: 0.9               # L2 / L1.5 Jaccard 匹配阈值
   use_l1_5: true               # 是否启用 L1.5 数值范围校验
-  l1_5_context_window: 100      # L1.5 数值命中后，正负方向扩展的上下文窗口大小（字符）
+  l1_5_context_window: 30      # L1.5 数值命中后，正负方向扩展的上下文窗口大小（字符）
 
+# 总数据集划分参数
+dataset_total:
+  sft_split: 0.3
+  grpo_split: 0.7
+  seed: 42
 # SFT 数据集参数
 dataset:
   output_dir: "/workspace/Output/SFTDatasets"  # 输出目录
   negative_ratio: 0.2          # 负样本占比 (0.0 ~ 1.0)
+  seed: 42                     # 随机种子
+  train_split: 0.6              # 训练集占比
+  val_split: 0.1                # 验证集占比
+  test_split: 0.3               # 测试集占比
+# GRPO 数据集参数
+dataset_grpo:
+  output_dir: "/workspace/Output/GRPODatasets"  # 输出目录
+  negative_ratio: 0.5          # 负样本占比 (0.0 ~ 1.0)
   seed: 42                     # 随机种子
   train_split: 0.6              # 训练集占比
   val_split: 0.1                # 验证集占比

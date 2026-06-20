@@ -1,13 +1,14 @@
 """
 build_sft_dataset.py
 ====================
-构建 Phase 0 SFT 节点提取训练数据集。
+构建 Phase 0 SFT + GRPO 节点提取训练数据集。
 
 运行方式（容器内）：
   python scripts/build_sft_dataset.py
 
 输出：
-  /workspace/Output/SFTDatasets/sft_node_train.json  — SFT 训练数据 (JSONL)
+  /workspace/Output/SFTDatasets/sft_node_train.json   — SFT 训练数据 (JSONL)
+  /workspace/Output/GRPODatasets/grpo_node_train.json — GRPO 训练数据 (JSONL)
   scripts/output/sft_dataset_report.json             — 构建报告
 """
 
